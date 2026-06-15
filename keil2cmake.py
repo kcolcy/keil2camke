@@ -232,8 +232,8 @@ set(CMAKE_SYSTEM_PROCESSOR          arm)
 set(CMAKE_C_COMPILER_ID ARMClang)
 set(CMAKE_CXX_COMPILER_ID ARMClang)
 
-# ARMCLANG V6 from Keil MDK C/C++ compiler 用户需要自行调整实际路径
-set(TOOLCHAIN_PATH                "D:\\\\Software\\\\Keil_v5\\\\ARM\\\\ARMCLANG\\\\bin\\\\")
+# ARMCLANG V6 from Keil MDK C/C++ compiler
+set(TOOLCHAIN_PATH                "D:/Software/Keil_v5/ARM/ARMCLANG/bin/")
 
 set(CMAKE_C_COMPILER                "${TOOLCHAIN_PATH}armclang.exe")
 set(CMAKE_ASM_COMPILER              "${CMAKE_C_COMPILER}")
