@@ -1,9 +1,66 @@
 import xml.etree.ElementTree as ET
 import os
+import re
 import argparse
 
 import configparser
 from pathlib import Path
+
+
+def parse_cpu_info(cpu_string, device_name):
+    """
+    从 uvprojx 的 <Cpu> 和 <Device> 字段自动解析芯片架构信息。
+
+    参数:
+        cpu_string: str，例如 "FPU2 CPUTYPE(\"Cortex-M4\") TZ"
+        device_name: str，例如 "STM32F405RGTx"
+
+    返回:
+        dict，包含 cpu_type, fpu_type, float_abi, linker_cpu, device_family
+    """
+    info = {
+        'cpu_type': 'Cortex-M3',
+        'fpu_type': None,
+        'float_abi': 'soft',
+        'linker_cpu': 'Cortex-M3',
+        'device_family': 'STM32F1xx',
+    }
+
+    # 从 Cpu 字段解析 CPU 类型
+    cpu_match = re.search(r'CPUTYPE\("([^"]+)"\)', cpu_string)
+    if cpu_match:
+        info['cpu_type'] = cpu_match.group(1)
+
+    # 从 Cpu 字段解析 FPU 类型
+    if 'FPU3' in cpu_string or 'DFPU' in cpu_string:
+        info['fpu_type'] = 'fpv5-d16'
+        info['float_abi'] = 'hard'
+    elif 'FPU' in cpu_string:
+        info['fpu_type'] = 'fpv4-sp-d16'
+        info['float_abi'] = 'hard'
+
+    # 根据 CPU 类型和 FPU 生成链接器 CPU 标志
+    cpu = info['cpu_type']
+    if cpu == 'Cortex-M7':
+        if info['fpu_type'] == 'fpv5-d16':
+            info['linker_cpu'] = 'Cortex-M7.fp.dp'
+        else:
+            info['linker_cpu'] = 'Cortex-M7.fp.sp'
+    elif cpu == 'Cortex-M4':
+        if info['fpu_type']:
+            info['linker_cpu'] = 'Cortex-M4.fp.sp'
+        else:
+            info['linker_cpu'] = 'Cortex-M4'
+    else:
+        info['linker_cpu'] = cpu
+
+    # 从 Device 字段推导 STM32 系列
+    # 例: STM32F405RGTx -> STM32F4xx, STM32H743VITx -> STM32H7xx, STM32F103ZE -> STM32F1xx
+    dev_match = re.match(r'(STM32[A-Z]\d)', device_name)
+    if dev_match:
+        info['device_family'] = dev_match.group(1) + 'xx'
+
+    return info
 
 
 def parse_uvprojx(uvprojx_path):
@@ -59,6 +116,15 @@ def parse_uvprojx(uvprojx_path):
         device_name = device_node.text
     # print(f"Device: {device_name}")
 
+    # Cpu 字段（包含 CPU 类型、FPU 信息等）
+    cpu_string = ''
+    cpu_node = root.find('.//Targets/Target/TargetOption/TargetCommonOption/Cpu')
+    if cpu_node is not None and cpu_node.text:
+        cpu_string = cpu_node.text
+
+    # 解析芯片架构信息
+    cpu_info = parse_cpu_info(cpu_string, device_name if device_name else 'STM32F103')
+
     # 编译器版本检测
     # print("\n\nValidating compilor version...")
     use_armclang = False
@@ -106,10 +172,12 @@ def parse_uvprojx(uvprojx_path):
         'ld_flags': ld_flags,
         'output_dir': output_dir,
         'use_armclang': use_armclang,
-        'opt_level': opt_level
+        'opt_level': opt_level,
+        'cpu_info': cpu_info,
+        'device_family': cpu_info['device_family'],
     }
 
-def generate_stm32cubemx_cmake(source_files, include_paths, defines):
+def generate_stm32cubemx_cmake(source_files, include_paths, defines, device_family):
     """
     生成 CMake 文本块，自动为源文件和包含路径添加 ${CMAKE_CURRENT_SOURCE_DIR}/../ 前缀。
     对于 startup_stm32xxxx.s 文件，额外添加 ../../MDK-ARM/ 前缀。
@@ -118,6 +186,7 @@ def generate_stm32cubemx_cmake(source_files, include_paths, defines):
         source_files: list of str，源文件路径列表（例如 ["../Core/Src/main.c", "startup_stm32f429xx.s"]）
         include_paths: list of str，头文件包含路径列表（例如 ["../Core/Inc", "../Drivers/..."]）
         defines: list of str，预定义宏列表（例如 ["USE_FULL_LL_DRIVER", "HSE_VALUE=8000000", ...]）
+        device_family: str，芯片系列（例如 "STM32F4xx"）
 
     返回:
         str，完整的 CMakeLists.txt 文本
@@ -142,10 +211,12 @@ def generate_stm32cubemx_cmake(source_files, include_paths, defines):
     app_sources = []
     driver_sources = []
     for src in prefixed_sources:
-        # 规则：包含 Drivers/STM32F4xx_HAL_Driver/Src/ 或 stm32f4xx_ll_ 或 system_stm32f4xx.c 的归为驱动
-        if ('Drivers/STM32F4xx_HAL_Driver/Src/' in src or
-            'stm32f4xx_ll_' in src or
-            src.endswith('system_stm32f4xx.c')):
+        # 规则：包含 Drivers/{device_family}_HAL_Driver/Src/ 或 stm32XXX_ll_ 或 system_stm32XXX.c 的归为驱动
+        # device_family 例如 "STM32F4xx"，对应文件名中的小写形式 "stm32f4xx"
+        family_lower = device_family.lower()  # "stm32f4xx"
+        if (f'Drivers/{device_family}_HAL_Driver/Src/' in src or
+            f'{family_lower}_ll_' in src or
+            src.endswith(f'system_{family_lower}.c')):
             driver_sources.append(src)
         else:
             app_sources.append(src)
@@ -180,7 +251,19 @@ enable_language(C ASM)
 # STM32 HAL/LL Drivers
 {driver_src_block}
 # Drivers Midllewares
-
+#   默认情况下 Midllewares 和 User 的 src 会被放读取到 MX_Application_Src 中，直接编译也可以，
+#   为了方便管理，建议将 Midllewares 的 src 放到 Midllewares_Src 中，User 的 src 放到顶层 CMakeLists.txt 中，
+#   请自行复制 Midllewares 相关代码到 Midllewares Src 中，
+#   自行复制 User 的 src 到顶层 CMakeLists.txt，Midllewares 网口示例如下
+#   1. 添加 LwIP_Src
+#   set(LwIP_Src
+#   网口相关的 Midllewares
+#   )
+#   2. 添加 LwIP_Src 到下面的 MX_LINK_LIBS 中
+#   3. Create LwIP static library
+#   add_library(LwIP OBJECT)
+#   target_sources(LwIP PRIVATE ${{LwIP_Src}})
+#   target_link_libraries(LwIP PUBLIC stm32cubemx)
 
 
 # Link directories setup
@@ -225,22 +308,33 @@ endif()"""
 
 
 
-def generate_armclang_cmake():
-    cmake_text = '''set(CMAKE_SYSTEM_NAME               Generic)
+def generate_armclang_cmake(cpu_info):
+    cpu_type = cpu_info['cpu_type']
+    fpu_type = cpu_info['fpu_type']
+    float_abi = cpu_info['float_abi']
+    linker_cpu = cpu_info['linker_cpu']
+
+    # 构造 TARGET_FLAGS
+    target_flags = f'--target=arm-arm-none-eabi -mcpu={cpu_type.lower()}'
+    if fpu_type:
+        target_flags += f' -mfpu={fpu_type}'
+    target_flags += f' -mfloat-abi={float_abi}'
+
+    cmake_text = f'''set(CMAKE_SYSTEM_NAME               Generic)
 set(CMAKE_SYSTEM_PROCESSOR          arm)
 
 set(CMAKE_C_COMPILER_ID ARMClang)
 set(CMAKE_CXX_COMPILER_ID ARMClang)
 
 # ARMCLANG V6 from Keil MDK C/C++ compiler
-set(TOOLCHAIN_PATH                "D:/Software/Keil_v5/ARM/ARMCLANG/bin/")
+set(TOOLCHAIN_PATH                "D:\\\\Software\\\\Keil_v5\\\\ARM\\\\ARMCLANG\\\\bin\\\\")
 
-set(CMAKE_C_COMPILER                "${TOOLCHAIN_PATH}armclang.exe")
-set(CMAKE_ASM_COMPILER              "${CMAKE_C_COMPILER}")
-set(CMAKE_CXX_COMPILER              "${TOOLCHAIN_PATH}armclang.exe")
-set(CMAKE_LINKER                    "${TOOLCHAIN_PATH}armlink.exe")
-set(CMAKE_OBJCOPY                   "${TOOLCHAIN_PATH}fromelf.exe")
-set(CMAKE_SIZE                      "${TOOLCHAIN_PATH}fromelf.exe")
+set(CMAKE_C_COMPILER                "${{TOOLCHAIN_PATH}}armclang.exe")
+set(CMAKE_ASM_COMPILER              "${{CMAKE_C_COMPILER}}")
+set(CMAKE_CXX_COMPILER              "${{TOOLCHAIN_PATH}}armclang.exe")
+set(CMAKE_LINKER                    "${{TOOLCHAIN_PATH}}armlink.exe")
+set(CMAKE_OBJCOPY                   "${{TOOLCHAIN_PATH}}fromelf.exe")
+set(CMAKE_SIZE                      "${{TOOLCHAIN_PATH}}fromelf.exe")
 
 set(CMAKE_EXECUTABLE_SUFFIX_ASM     ".elf")
 set(CMAKE_EXECUTABLE_SUFFIX_C       ".elf")
@@ -249,31 +343,31 @@ set(CMAKE_EXECUTABLE_SUFFIX_CXX     ".elf")
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 # MCU specific flags
-set(TARGET_FLAGS "--target=arm-arm-none-eabi -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard ")
+set(TARGET_FLAGS "{target_flags} ")
 
 # C compiler flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TARGET_FLAGS}")
+set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} ${{TARGET_FLAGS}}")
 # ASM compiler flags
-set(CMAKE_ASM_FLAGS "${CMAKE_C_FLAGS} -masm=auto")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gdwarf-4 -ffunction-sections")
+set(CMAKE_ASM_FLAGS "${{CMAKE_C_FLAGS}} -masm=auto")
+set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} -gdwarf-4 -ffunction-sections")
 
 # The cyclomatic-complexity parameter must be defined for the Cyclomatic complexity feature in STM32CubeIDE to work.
 # However, most GCC toolchains do not support this option, which causes a compilation error; for this reason, the feature is disabled by default.
-# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fcyclomatic-complexity")
+# set(CMAKE_C_FLAGS "${{CMAKE_C_FLAGS}} -fcyclomatic-complexity")
 
 set(CMAKE_C_FLAGS_DEBUG "-O1 -g")
 set(CMAKE_C_FLAGS_RELEASE "-Os -g0")
 set(CMAKE_CXX_FLAGS_DEBUG "-O1 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-Os -g0")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
+set(CMAKE_CXX_FLAGS "${{CMAKE_C_FLAGS}} -fno-rtti -fno-exceptions -fno-threadsafe-statics")
 
-set(CMAKE_EXE_LINKER_FLAGS "--cpu=Cortex-M4.fp.sp")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --strict")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --scatter  \\"${CMAKE_SOURCE_DIR}/MDK-ARM/${CMAKE_PROJECT_NAME}/${CMAKE_PROJECT_NAME}.sct\\"")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --summary_stderr --info summarysizes --map")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --load_addr_map_info --xref --callgraph --symbols")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --info sizes --info totals --info unused --info veneers")
+set(CMAKE_EXE_LINKER_FLAGS "--cpu={linker_cpu}")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --strict")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --scatter  \\"${{CMAKE_SOURCE_DIR}}/MDK-ARM/${{CMAKE_PROJECT_NAME}}/${{CMAKE_PROJECT_NAME}}.sct\\"")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --summary_stderr --info summarysizes --map")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --load_addr_map_info --xref --callgraph --symbols")
+set(CMAKE_EXE_LINKER_FLAGS "${{CMAKE_EXE_LINKER_FLAGS}} --info sizes --info totals --info unused --info veneers")
 
 # Ninja generator uses these rule variables.
 # armlink syntax: armlink [options] --list <map> -o <output> <objects>
@@ -476,15 +570,17 @@ def main():
     # 写入文件，自动创建目录
     for key, path in paths.items():
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
+        # 以 utf_8 编码写入文件，确保中文字符不会出现乱码
+        with open(path, 'w', encoding='utf-8') as f:
             if key == 'stm32cubemx':
                 content = generate_stm32cubemx_cmake(
                     project_data['source_files'],
                     project_data['include_paths'],
-                    project_data['defines']
+                    project_data['defines'],
+                    project_data['device_family']
                 )
             elif key == 'armclang':
-                content = generate_armclang_cmake()
+                content = generate_armclang_cmake(project_data['cpu_info'])
             elif key == 'CMakePresets':
                 content = generate_CMakePresets()
             else:
