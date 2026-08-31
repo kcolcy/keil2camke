@@ -2,6 +2,7 @@ import xml.etree.ElementTree as ET
 import os
 import re
 import argparse
+import sys
 
 import configparser
 from pathlib import Path
@@ -64,118 +65,172 @@ def parse_cpu_info(cpu_string, device_name):
 
 
 def parse_uvprojx(uvprojx_path):
-    """解析uvprojx文件，提取项目配置"""
+    """解析uvprojx文件，提取所有 Target 的项目配置
+
+    参数:
+        uvprojx_path: str，.uvprojx 工程文件路径
+
+    返回:
+        list of dict，每个元素对应一个 Target 的完整配置，
+        键名与原单 Target 版本一致:
+        project_name, source_files, include_paths, defines, linker_script,
+        device, c_flags, asm_flags, ld_flags, output_dir, use_armclang,
+        opt_level, cpu_info, device_family
+    """
     tree = ET.parse(uvprojx_path)
     root = tree.getroot()
-    
-    # 项目基本信息
-    # print("Getting target info...")
-    project_name = root.find('.//Targets/Target/TargetName').text
-    # print(f"Project Name: {project_name}")
-    output_dir = root.find('.//Targets/Target/TargetOption/TargetCommonOption/OutputDirectory').text or 'build/'
-    
-    # 源文件收集
-    # print("\n\nCollecting source files...")
-    source_files = []
-    for group in root.findall('.//Groups/Group'):
-        for file in group.findall('Files/File'):
-            file_path = file.find('FilePath').text
-            if file_path.endswith(('.c', '.C', '.cpp', '.s', '.S', '.asm')):
-                source_files.append(file_path)
-                # print(f"source file: {file_path}")
-    
-    # 包含路径
-    # print("\n\nSetting include paths...")
-    include_paths = []
-    includes = root.find('.//TargetOption/TargetArmAds/Cads/VariousControls/IncludePath')
-    if includes is not None and includes.text:
-        include_paths.extend(includes.text.split(';'))
-        # print(f"Include Paths: {include_paths}")
-    
-    # 预定义宏
-    # print("\n\nLoading preset defines...")
-    defines = []
-    defs = root.find('.//TargetOption/TargetArmAds/Cads/VariousControls/Define')
-    if defs is not None and defs.text:
-        defines.extend([d.strip() for d in defs.text.split(',')])
-        # print(f"Defines: {defines}")
-    
-    # 链接器脚本
-    # print("\n\nLooking for scatter file...")
-    linker_script = None
-    scatter_file = root.find('.//TargetOption/TargetArmAds/LDads/ScatterFile')
-    if scatter_file is not None and scatter_file.text:
-        linker_script = scatter_file.text
-    # print(f"Linker Script: {linker_script}")
 
-    # 设备信息
-    # print("\n\nGetting device info...")
-    device_name = None
-    device_node = root.find('.//Targets/Target/TargetOption/TargetCommonOption/Device')
-    if device_node is not None and device_node.text:
-        device_name = device_node.text
-    # print(f"Device: {device_name}")
+    # 收集所有 Target 节点（注意：只有一个 Target 时 findall 也会正常返回列表）
+    target_nodes = root.findall('.//Targets/Target')
+    if not target_nodes:
+        raise ValueError(f"未在 {uvprojx_path} 中找到任何 Target 节点")
 
-    # Cpu 字段（包含 CPU 类型、FPU 信息等）
-    cpu_string = ''
-    cpu_node = root.find('.//Targets/Target/TargetOption/TargetCommonOption/Cpu')
-    if cpu_node is not None and cpu_node.text:
-        cpu_string = cpu_node.text
+    results = []
+    for target in target_nodes:
+        # 项目名称（TargetName）
+        project_name = 'Unknown'
+        name_node = target.find('TargetName')
+        if name_node is not None and name_node.text:
+            project_name = name_node.text.strip()
 
-    # 解析芯片架构信息
-    cpu_info = parse_cpu_info(cpu_string, device_name if device_name else 'STM32F103')
+        # 输出目录
+        output_dir = 'build/'
+        out_node = target.find('./TargetOption/TargetCommonOption/OutputDirectory')
+        if out_node is not None and out_node.text:
+            output_dir = out_node.text
 
-    # 编译器版本检测
-    # print("\n\nValidating compilor version...")
-    use_armclang = False
-    armclang_node = root.find('.//TargetOption/TargetArmAds/UseArmClang')
-    if armclang_node is not None and armclang_node.text == '1':
-        use_armclang = True
-    
-    # 编译器选项
-    # print("\n\nSetting options for compilors and linkers...")
-    c_flags = root.find('.//TargetOption/TargetArmAds/Cads/VariousControls/MiscControls') 
-    asm_flags = root.find('.//TargetOption/TargetArmAds/Aads/VariousControls/MiscControls') 
-    ld_flags = root.find('.//TargetOption/TargetArmAds/LDads/VariousControls/MiscControls') 
-    if c_flags is not None and c_flags.text is not None:
-        c_flags = c_flags.text
-    else:
-        c_flags = ''
-    if asm_flags is not None and asm_flags.text is not None:
-        asm_flags = asm_flags.text
-    else:
-        asm_flags = ''
-    if ld_flags is not None:
-        ld_flags = ld_flags.text
-    else:
-        ld_flags = ''
-    # print(f"C Flags: {c_flags}")
-    # print(f"ASM Flags: {asm_flags}")
-    # print(f"LD Flags: {ld_flags}")
-    
-    # 优化级别
-    # print("\n\nDefining optimize level...")
-    opt_level = "0"
-    opt_node = root.find('.//TargetOption/TargetArmAds/Cads/Optimization')
-    if opt_node is not None and opt_node.text:
-        opt_level = opt_node.text
-    
-    return {
-        'project_name': project_name,
-        'source_files': source_files,
-        'include_paths': include_paths,
-        'defines': defines,
-        'linker_script': linker_script,
-        'device': device_name.strip() if device_name else "Unknown",
-        'c_flags': c_flags,
-        'asm_flags': asm_flags,
-        'ld_flags': ld_flags,
-        'output_dir': output_dir,
-        'use_armclang': use_armclang,
-        'opt_level': opt_level,
-        'cpu_info': cpu_info,
-        'device_family': cpu_info['device_family'],
-    }
+        # 源文件收集（只收集当前 Target 下的 Groups，避免多个 Target 互相串扰）
+        source_files = []
+        for group in target.findall('./Groups/Group'):
+            for file in group.findall('./Files/File'):
+                path_node = file.find('FilePath')
+                if path_node is None or not path_node.text:
+                    continue
+                file_path = path_node.text.strip()
+                if file_path.endswith(('.c', '.C', '.cpp', '.s', '.S', '.asm')):
+                    source_files.append(file_path)
+
+        # 包含路径（当前 Target 的 TargetOption）
+        include_paths = []
+        includes = target.find('./TargetOption/TargetArmAds/Cads/VariousControls/IncludePath')
+        if includes is not None and includes.text:
+            include_paths.extend([p.strip() for p in includes.text.split(';') if p.strip()])
+
+        # 预定义宏
+        defines = []
+        defs = target.find('./TargetOption/TargetArmAds/Cads/VariousControls/Define')
+        if defs is not None and defs.text:
+            defines.extend([d.strip() for d in defs.text.split(',') if d.strip()])
+
+        # 链接器脚本
+        linker_script = None
+        scatter_file = target.find('./TargetOption/TargetArmAds/LDads/ScatterFile')
+        if scatter_file is not None and scatter_file.text:
+            linker_script = scatter_file.text
+
+        # 设备信息
+        device_name = None
+        device_node = target.find('./TargetOption/TargetCommonOption/Device')
+        if device_node is not None and device_node.text:
+            device_name = device_node.text
+
+        # Cpu 字段（包含 CPU 类型、FPU 信息等）
+        cpu_string = ''
+        cpu_node = target.find('./TargetOption/TargetCommonOption/Cpu')
+        if cpu_node is not None and cpu_node.text:
+            cpu_string = cpu_node.text
+
+        # 解析芯片架构信息
+        cpu_info = parse_cpu_info(cpu_string, device_name if device_name else 'STM32F103')
+
+        # 编译器版本检测
+        use_armclang = False
+        armclang_node = target.find('./TargetOption/TargetArmAds/UseArmClang')
+        if armclang_node is not None and armclang_node.text == '1':
+            use_armclang = True
+
+        # 编译器选项
+        def _misc_text(xpath):
+            node = target.find(xpath)
+            if node is not None and node.text is not None:
+                return node.text
+            return ''
+
+        c_flags = _misc_text('./TargetOption/TargetArmAds/Cads/VariousControls/MiscControls')
+        asm_flags = _misc_text('./TargetOption/TargetArmAds/Aads/VariousControls/MiscControls')
+        ld_flags = _misc_text('./TargetOption/TargetArmAds/LDads/VariousControls/MiscControls')
+
+        # 优化级别
+        opt_level = '0'
+        opt_node = target.find('./TargetOption/TargetArmAds/Cads/Optimization')
+        if opt_node is not None and opt_node.text:
+            opt_level = opt_node.text
+
+        results.append({
+            'project_name': project_name,
+            'source_files': source_files,
+            'include_paths': include_paths,
+            'defines': defines,
+            'linker_script': linker_script,
+            'device': device_name.strip() if device_name else 'Unknown',
+            'c_flags': c_flags,
+            'asm_flags': asm_flags,
+            'ld_flags': ld_flags,
+            'output_dir': output_dir,
+            'use_armclang': use_armclang,
+            'opt_level': opt_level,
+            'cpu_info': cpu_info,
+            'device_family': cpu_info['device_family'],
+        })
+
+    return results
+
+
+def select_target(targets, target_index=None):
+    """从多个 Target 中选择一个用于生成。
+
+    参数:
+        targets: list of dict，parse_uvprojx 的返回值
+        target_index: int or None，通过命令行 --target 指定的 1-based 编号
+
+    返回:
+        选中的 Target dict；用户取消或参数无效时返回 None
+    """
+    # 只有一个 Target 时直接使用，无需交互
+    if len(targets) == 1:
+        return targets[0]
+
+    print(f"\n检测到 {len(targets)} 个 Target：")
+    for i, t in enumerate(targets, start=1):
+        print(f"  [{i}] {t['project_name']}  (Device: {t['device']}, 源文件数: {len(t['source_files'])})")
+
+    # 提醒：链接脚本文件名需与所选 Target 对应
+    print("\n提醒：生成的链接脚本路径为 MDK-ARM/${CMAKE_PROJECT_NAME}/${CMAKE_PROJECT_NAME}.sct，")
+    print("      请确保 MDK-ARM 目录下链接文件 (.sct) 的文件名与所选 Target 名称一致；")
+    print("      若 Target 名称包含特殊字符（如括号），会被替换为下划线，.sct 文件名需对应替换后的名称。")
+
+    # 优先使用命令行参数 --target
+    if target_index is not None:
+        if 1 <= target_index <= len(targets):
+            return targets[target_index - 1]
+        print(f"错误：--target 参数 {target_index} 超出范围 (1-{len(targets)})。")
+        return None
+
+    # 交互式选择
+    while True:
+        try:
+            choice = input(f"\n请输入要生成的 Target 编号 (1-{len(targets)})，输入 q 取消：").strip()
+        except EOFError:
+            print("错误：无法读取输入（标准输入已关闭），请使用 --target 参数指定 Target 编号。")
+            return None
+        if choice.lower() in ('q', 'quit', 'exit'):
+            print("已取消，未生成任何文件。")
+            return None
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(targets):
+                return targets[idx - 1]
+        print(f"输入无效，请输入 1-{len(targets)} 之间的数字。")
 
 def generate_stm32cubemx_cmake(source_files, include_paths, defines, device_family):
     """
@@ -394,6 +449,10 @@ endif()
 
 
 def generate_top_cmake(prj_name):
+    # Target 名称可能包含括号等 CMake 不支持的字符（如 "H7(test)"），
+    # 统一替换为下划线，保证生成的 project() 命令合法
+    prj_name = re.sub(r'[^A-Za-z0-9_.-]', '_', prj_name)
+
     cmake_text_header = '''cmake_minimum_required(VERSION 3.22)
 
 #
@@ -537,28 +596,63 @@ def find_uvprojx_files(root_dir, max_depth=5):
     return result
 
 def main():
+    # 确保控制台输出使用 UTF-8，避免中文在部分环境下乱码
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
+    # 命令行参数
+    parser = argparse.ArgumentParser(description='将 Keil MDK (.uvprojx) 工程转换为 CMake 工程')
+    parser.add_argument('uvprojx', nargs='?', default=None,
+                        help='指定 .uvprojx 工程文件路径；不指定时自动在当前目录及其子目录中搜索')
+    parser.add_argument('--target', type=int, default=None, metavar='N',
+                        help='指定要生成的 Target 编号（从 1 开始）；工程有多个 Target 时可用该参数免交互选择')
+    parser.add_argument('--list-targets', action='store_true',
+                        help='仅列出工程中的 Target 列表，不生成文件')
+    args = parser.parse_args()
+
     # 获取当前脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # 搜索所有 .uvprojx 文件（最大深度5级）
-    uvprojx_files = find_uvprojx_files(script_dir, max_depth=5)
-    
-    if not uvprojx_files:
-        print("错误：在当前目录及其子目录（最深5层）中未找到任何 .uvprojx 文件。")
-        return
-    
-    # 如果找到多个，提示并默认使用第一个
-    if len(uvprojx_files) > 1:
-        print("警告：找到多个 .uvprojx 文件，将使用第一个进行处理：")
-        for f in uvprojx_files:
-            print(f"  {f}")
-    
-    uvprojx_path = uvprojx_files[0]
+
+    # 确定要处理的 .uvprojx 文件
+    if args.uvprojx:
+        uvprojx_path = os.path.abspath(args.uvprojx)
+        if not os.path.isfile(uvprojx_path):
+            print(f"错误：找不到指定的工程文件 {uvprojx_path}")
+            return
+    else:
+        # 搜索所有 .uvprojx 文件（最大深度5级）
+        uvprojx_files = find_uvprojx_files(script_dir, max_depth=5)
+
+        if not uvprojx_files:
+            print("错误：在当前目录及其子目录（最深5层）中未找到任何 .uvprojx 文件。")
+            print("可通过命令行参数直接指定工程文件路径，例如：python keil2cmake.py MDK-ARM/H7.uvprojx")
+            return
+
+        # 实际工程中只有一个 .uvprojx；即使找到多个，也直接使用读到的第一个
+        uvprojx_path = uvprojx_files[0]
+
     print(f"正在处理项目文件：{uvprojx_path}")
-    
-    # 解析项目文件（假设 parse_uvprojx 等函数已定义）
-    project_data = parse_uvprojx(uvprojx_path)
-    
+
+    # 解析所有 Target
+    targets = parse_uvprojx(uvprojx_path)
+
+    # 仅列出 Target 模式
+    if args.list_targets:
+        print(f"\n工程 {os.path.basename(uvprojx_path)} 包含 {len(targets)} 个 Target：")
+        for i, t in enumerate(targets, start=1):
+            print(f"  [{i}] {t['project_name']}  (Device: {t['device']}, 源文件数: {len(t['source_files'])})")
+        return
+
+    # 选择 Target：只有一个时直接生成；有多个时输出列表让用户选择
+    project_data = select_target(targets, target_index=args.target)
+    if project_data is None:
+        return
+
+    print(f"已选择 Target：{project_data['project_name']}")
+
     # 定义输出路径（仍然在脚本所在目录下的 cmake 子目录中）
     paths = {
         'stm32cubemx': os.path.join(script_dir, 'cmake', 'stm32cubemx', 'CMakeLists.txt'),
@@ -566,7 +660,7 @@ def main():
         'top': os.path.join(script_dir, 'CMakeLists.txt'),
         'CMakePresets': os.path.join(script_dir, 'CMakePresets.json')   # 添加这一行
     }
-    
+
     # 写入文件，自动创建目录
     for key, path in paths.items():
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -586,7 +680,7 @@ def main():
             else:
                 content = generate_top_cmake(project_data['project_name'])
             f.write(content)
-    
+
     print("CMake 文件生成完成。")
 
 if __name__ == "__main__":
