@@ -208,6 +208,7 @@ def select_target(targets, target_index=None):
     print("\n提醒：生成的链接脚本路径为 MDK-ARM/${CMAKE_PROJECT_NAME}/${CMAKE_PROJECT_NAME}.sct，")
     print("      请确保 MDK-ARM 目录下链接文件 (.sct) 的文件名与所选 Target 名称一致；")
     print("      若 Target 名称包含特殊字符（如括号），会被替换为下划线，.sct 文件名需对应替换后的名称。")
+    print("      最简单的处理办法为将顶层cmakelist中的 CMAKE_PROJECT_NAME 修改成和.sct 文件名一致。")
 
     # 优先使用命令行参数 --target
     if target_index is not None:
