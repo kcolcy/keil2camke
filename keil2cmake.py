@@ -308,12 +308,13 @@ enable_language(C ASM)
 {driver_src_block}
 # Drivers Midllewares
 #   默认情况下 Midllewares 和 User 的 src 会被放读取到 MX_Application_Src 中，直接编译也可以，
-#   为了方便管理，建议将 Midllewares 的 src 放到 Midllewares_Src 中，User 的 src 放到顶层 CMakeLists.txt 中，
+#   但为了方便管理，建议将 Midllewares 的 src 放到 Midllewares_Src 中，User 的 src 放到顶层 CMakeLists.txt 中，
 #   请自行复制 Midllewares 相关代码到 Midllewares Src 中，
-#   自行复制 User 的 src 到顶层 CMakeLists.txt，Midllewares 网口示例如下
+#   自行复制 User 的 src 到顶层 CMakeLists.txt，Midllewares 
+#   以网口示例 为例：
 #   1. 添加 LwIP_Src
 #   set(LwIP_Src
-#   网口相关的 Midllewares
+#   网口相关的 Midllewares 源码列表
 #   )
 #   2. 添加 LwIP_Src 到下面的 MX_LINK_LIBS 中
 #   3. Create LwIP static library
